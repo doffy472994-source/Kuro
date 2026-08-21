@@ -24,6 +24,7 @@ search/fetch requests to avoid browser CORS issues.
 - **`api/exa/`** is a small Cloudflare Worker (`worker.js`) that forwards
   `/search` and `/contents` requests to `api.exa.ai` server-side, so the app
   can do web search/fetch without hitting CORS restrictions in the browser.
+  The app is hardcoded to call it at `https://kuro.itsricky.dev/api/exa`.
   See `api/exa/README.md` for deploy instructions.
 
 ## Updating the build
@@ -48,5 +49,8 @@ wrangler login
 wrangler deploy
 ```
 
-Copy the resulting `*.workers.dev` URL into Kuro's Settings panel as the
-Worker URL, alongside your Exa API key.
+The app expects the worker to be reachable at `https://kuro.itsricky.dev/api/exa`
+(see `EXA_WORKER_BASE` in `src/App.jsx`). Route the worker to that domain/path
+in your Cloudflare dashboard (or update `EXA_WORKER_BASE` and rebuild if you're
+using a different domain). Only an Exa API key needs to be entered in Kuro's
+Settings panel — the worker URL is no longer configurable there.

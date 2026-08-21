@@ -28,12 +28,14 @@ Both simply relay the JSON body you send and return Exa's response as-is.
    ```bash
    wrangler deploy
    ```
-4. Wrangler will print a URL like:
-   ```
-   https://kuro-exa-proxy.<your-subdomain>.workers.dev
-   ```
-5. In Kuro, open **Settings**, paste that URL into **Worker URL**, and paste
-   your Exa API key into **Exa API Key**. Web search/fetch will start working.
+4. Kuro's client is hardcoded to call the worker at
+   `https://kuro.itsricky.dev/api/exa` (see `EXA_WORKER_BASE` in `src/App.jsx`
+   of the Vite project). Add a route or custom domain in the Cloudflare
+   dashboard so this worker answers at that address — e.g. a route like
+   `kuro.itsricky.dev/api/exa*` pointed at this worker.
+5. In Kuro, open **Settings** and paste your Exa API key into **Exa API Key**.
+   Web search/fetch will start working — there's no separate Worker URL field
+   to fill in anymore.
 
 ## Notes
 
