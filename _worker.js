@@ -1,4 +1,4 @@
-import exaWorker from "./api/exa/index.js";
+import exaWorker from "./api/exa/worker.js";
 
 export default {
   async fetch(request, env, ctx) {

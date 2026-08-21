@@ -1,0 +1,8 @@
+{
+  "name": "kuro",
+  "compatibility_date": "2026-08-20",
+  "main": "_worker.js",
+  "assets": {
+    "directory": "."
+  }
+}
