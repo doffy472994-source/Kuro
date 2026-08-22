@@ -381,6 +381,60 @@ function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
+// Groq vision support is model-specific, not universal — sending an image to a
+// text-only Groq model just errors. Keep this list in sync with Groq's docs.
+const GROQ_VISION_MODELS = new Set(["qwen/qwen3.6-27b"]);
+
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024; // 20MB, matches the tightest provider limit (Groq)
+const MAX_IMAGES_PER_MESSAGE = 5; // matches Groq's per-request cap, also a sane ceiling elsewhere
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error || new Error("Couldn't read file."));
+    reader.readAsDataURL(file);
+  });
+}
+
+// Internal message content shape used in app state (provider-agnostic):
+//   string, OR array of { type: "text", text } | { type: "image", dataUrl, mimeType, name }
+// Each streamX() function below converts this into whatever shape its API expects.
+
+function contentToClaudeBlocks(content) {
+  if (typeof content === "string") return content;
+  return content.map((part) =>
+    part.type === "image"
+      ? {
+          type: "image",
+          source: {
+            type: "base64",
+            media_type: part.mimeType,
+            data: part.dataUrl.split(",")[1] || "",
+          },
+        }
+      : { type: "text", text: part.text }
+  );
+}
+
+function contentToOpenAIBlocks(content) {
+  if (typeof content === "string") return content;
+  return content.map((part) =>
+    part.type === "image"
+      ? { type: "image_url", image_url: { url: part.dataUrl } }
+      : { type: "text", text: part.text }
+  );
+}
+
+function contentToGeminiParts(content) {
+  if (typeof content === "string") return [{ text: content }];
+  return content.map((part) =>
+    part.type === "image"
+      ? { inline_data: { mime_type: part.mimeType, data: part.dataUrl.split(",")[1] || "" } }
+      : { text: part.text }
+  );
+}
+
 function nowLabel() {
   return new Date().toLocaleString(undefined, {
     month: "short",
@@ -1316,7 +1370,7 @@ async function streamClaude(messages, userName, apiKey, onChunk, signal, toolsPr
     max_tokens: CLAUDE_MAX_TOKENS[resolvedModel] || 64000,
     stream: true,
     system: buildBaseSystemPrompt(userName) + (toolsPromptBlock || ""),
-    messages: messages.map((m) => ({ role: m.role, content: m.content })),
+    messages: messages.map((m) => ({ role: m.role, content: contentToClaudeBlocks(m.content) })),
   };
 
   const headers = {
@@ -1386,13 +1440,20 @@ async function streamClaude(messages, userName, apiKey, onChunk, signal, toolsPr
 
 async function streamGroq(messages, userName, apiKey, model, onChunk, signal, toolsPromptBlock) {
   const systemPrompt = buildBaseSystemPrompt(userName) + (toolsPromptBlock || "");
+  const resolvedModel = model || "openai/gpt-oss-120b";
+  const hasImages = messages.some((m) => Array.isArray(m.content) && m.content.some((p) => p.type === "image"));
+  if (hasImages && !GROQ_VISION_MODELS.has(resolvedModel)) {
+    throw new Error(
+      `${resolvedModel} doesn't support image input on Groq. Switch to Qwen3.6 27B to send images, or remove the attached image.`
+    );
+  }
 
   const body = {
-    model: model || "openai/gpt-oss-120b",
+    model: resolvedModel,
     stream: true,
     messages: [
       { role: "system", content: systemPrompt },
-      ...messages.map((m) => ({ role: m.role, content: m.content })),
+      ...messages.map((m) => ({ role: m.role, content: contentToOpenAIBlocks(m.content) })),
     ],
   };
 
@@ -1461,7 +1522,7 @@ async function streamOpenAI(messages, userName, apiKey, model, onChunk, signal, 
     stream: true,
     messages: [
       { role: "system", content: systemPrompt },
-      ...messages.map((m) => ({ role: m.role, content: m.content })),
+      ...messages.map((m) => ({ role: m.role, content: contentToOpenAIBlocks(m.content) })),
     ],
   };
 
@@ -1531,7 +1592,7 @@ async function streamGemini(messages, userName, apiKey, model, onChunk, signal, 
       .filter((m) => m.content)
       .map((m) => ({
         role: m.role === "assistant" ? "model" : "user",
-        parts: [{ text: m.content }],
+        parts: contentToGeminiParts(m.content),
       })),
   };
 
@@ -1600,6 +1661,11 @@ export default function Chatbot() {
   const [conversations, setConversations] = useState({});
   const [activeId, setActiveId] = useState(null);
   const [input, setInput] = useState("");
+  const [pendingImages, setPendingImages] = useState([]); // [{ id, dataUrl, mimeType, name }] — images attached but not yet sent
+  const [imageError, setImageError] = useState(null);
+  const cameraInputRef = useRef(null);
+  const photosInputRef = useRef(null);
+  const filesInputRef = useRef(null);
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [userName, setUserName] = useState("");
@@ -2058,15 +2124,66 @@ export default function Chatbot() {
     });
   }
 
+  async function handleFilesSelected(fileList) {
+    const files = Array.from(fileList || []).filter((f) => f.type.startsWith("image/"));
+    if (files.length === 0) return;
+    setImageError(null);
+
+    const room = MAX_IMAGES_PER_MESSAGE - pendingImages.length;
+    if (room <= 0) {
+      setImageError(`You can attach up to ${MAX_IMAGES_PER_MESSAGE} images per message.`);
+      return;
+    }
+    const toAdd = files.slice(0, room);
+    if (files.length > toAdd.length) {
+      setImageError(`Only added ${toAdd.length} — max ${MAX_IMAGES_PER_MESSAGE} images per message.`);
+    }
+
+    const oversized = toAdd.filter((f) => f.size > MAX_IMAGE_BYTES);
+    const valid = toAdd.filter((f) => f.size <= MAX_IMAGE_BYTES);
+    if (oversized.length > 0) {
+      setImageError(`${oversized.length} image${oversized.length > 1 ? "s" : ""} over 20MB skipped.`);
+    }
+
+    try {
+      const read = await Promise.all(
+        valid.map(async (f) => ({
+          id: uid(),
+          dataUrl: await readFileAsDataUrl(f),
+          mimeType: f.type,
+          name: f.name,
+        }))
+      );
+      setPendingImages((prev) => [...prev, ...read]);
+    } catch (e) {
+      setImageError(e.message || "Couldn't read that image.");
+    }
+  }
+
+  function removePendingImage(id) {
+    setPendingImages((prev) => prev.filter((img) => img.id !== id));
+  }
+
   async function handleSend() {
     const text = input.trim();
-    if (!text || loading || !active) return;
+    if ((!text && pendingImages.length === 0) || loading || !active) return;
     setError(null);
     setInput("");
+    const imagesToSend = pendingImages;
+    setPendingImages([]);
 
-    const userMsg = { role: "user", content: text, id: uid() };
+    const content =
+      imagesToSend.length === 0
+        ? text
+        : [
+            ...(text ? [{ type: "text", text }] : []),
+            ...imagesToSend.map((img) => ({ type: "image", dataUrl: img.dataUrl, mimeType: img.mimeType, name: img.name })),
+          ];
+
+    const userMsg = { role: "user", content, id: uid() };
     const isFirst = active.messages.length === 0;
-    const title = isFirst ? text.slice(0, 40) + (text.length > 40 ? "…" : "") : active.title;
+    const titleSource = text || "Image";
+    const title = isFirst ? titleSource.slice(0, 40) + (titleSource.length > 40 ? "…" : "") : active.title;
     const convoId = active.id;
 
     const withUser = {
@@ -2926,6 +3043,29 @@ export default function Chatbot() {
                 >
                   {m.role === "assistant" ? (
                     <AssistantContent content={m.content} toolEvents={m.toolEvents} />
+                  ) : Array.isArray(m.content) ? (
+                    <>
+                      {m.content
+                        .filter((p) => p.type === "image")
+                        .map((p, i) => (
+                          <img
+                            key={i}
+                            src={p.dataUrl}
+                            alt={p.name || "attached image"}
+                            style={{
+                              maxWidth: 220,
+                              maxHeight: 220,
+                              borderRadius: 10,
+                              display: "block",
+                              marginBottom: 6,
+                            }}
+                          />
+                        ))}
+                      {m.content
+                        .filter((p) => p.type === "text")
+                        .map((p) => p.text)
+                        .join("\n")}
+                    </>
                   ) : (
                     m.content
                   )}
@@ -3088,6 +3228,51 @@ export default function Chatbot() {
               padding: "14px 16px 10px",
             }}
           >
+            {pendingImages.length > 0 && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+                {pendingImages.map((img) => (
+                  <div key={img.id} style={{ position: "relative" }}>
+                    <img
+                      src={img.dataUrl}
+                      alt={img.name}
+                      style={{
+                        width: 56,
+                        height: 56,
+                        objectFit: "cover",
+                        borderRadius: 10,
+                        border: "1px solid #37322c",
+                        display: "block",
+                      }}
+                    />
+                    <button
+                      onClick={() => removePendingImage(img.id)}
+                      title="Remove image"
+                      style={{
+                        position: "absolute",
+                        top: -6,
+                        right: -6,
+                        width: 18,
+                        height: 18,
+                        borderRadius: "50%",
+                        border: "1px solid #37322c",
+                        background: "#211e1a",
+                        color: "#EDE9E2",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        cursor: "pointer",
+                        padding: 0,
+                      }}
+                    >
+                      <X size={11} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {imageError && (
+              <div style={{ fontSize: 12, color: "#D97757", marginBottom: 8 }}>{imageError}</div>
+            )}
             <textarea
               ref={textareaRef}
               value={input}
@@ -3139,6 +3324,40 @@ export default function Chatbot() {
                   <Plus size={16} />
                 </button>
 
+                <input
+                  ref={cameraInputRef}
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  style={{ display: "none" }}
+                  onChange={(e) => {
+                    handleFilesSelected(e.target.files);
+                    e.target.value = "";
+                  }}
+                />
+                <input
+                  ref={photosInputRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  style={{ display: "none" }}
+                  onChange={(e) => {
+                    handleFilesSelected(e.target.files);
+                    e.target.value = "";
+                  }}
+                />
+                <input
+                  ref={filesInputRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  style={{ display: "none" }}
+                  onChange={(e) => {
+                    handleFilesSelected(e.target.files);
+                    e.target.value = "";
+                  }}
+                />
+
                 {attachMenuOpen && (
                   <div
                     className="attach-menu"
@@ -3172,7 +3391,10 @@ export default function Chatbot() {
                     <div style={{ padding: 6 }}>
                       {isMobile && (
                         <button
-                          onClick={() => setAttachMenuOpen(false)}
+                          onClick={() => {
+                            setAttachMenuOpen(false);
+                            cameraInputRef.current?.click();
+                          }}
                           style={{
                             width: "100%",
                             display: "flex",
@@ -3196,7 +3418,10 @@ export default function Chatbot() {
                       )}
                       {isMobile && (
                         <button
-                          onClick={() => setAttachMenuOpen(false)}
+                          onClick={() => {
+                            setAttachMenuOpen(false);
+                            photosInputRef.current?.click();
+                          }}
                           style={{
                             width: "100%",
                             display: "flex",
@@ -3219,7 +3444,10 @@ export default function Chatbot() {
                         </button>
                       )}
                       <button
-                        onClick={() => setAttachMenuOpen(false)}
+                        onClick={() => {
+                          setAttachMenuOpen(false);
+                          filesInputRef.current?.click();
+                        }}
                         style={{
                           width: "100%",
                           display: "flex",
@@ -3493,7 +3721,7 @@ export default function Chatbot() {
                 </button>
                 <button
                   onClick={loading ? handleStop : handleSend}
-                  disabled={!loading && !input.trim()}
+                  disabled={!loading && !input.trim() && pendingImages.length === 0}
                   title={loading ? "Stop" : "Send"}
                   style={{
                     flexShrink: 0,
