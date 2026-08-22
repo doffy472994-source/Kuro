@@ -1,4 +1,4 @@
 # The Vite source project is not tracked — only the built single-file
 # index.html at the repo root is committed. Run `npm install && npm run build`
 # inside vite/ and copy dist/index.html to the repo root to update it.
-/vite/
+# /vite/ — now tracked on vite-source branch
