@@ -295,10 +295,11 @@ const COMPANIES = [
     name: "Anthropic",
     mark: { bg: "#EDE9E2", fg: "#1a1512", glyph: "svg:anthropic" },
     models: [
-      { id: "claude-opus-4-8", name: "Opus 4.8", note: "most capable, deepest reasoning", provider: "claude", host: null },
+      { id: "claude-opus-5", name: "Opus 5", note: "most capable, deepest reasoning", provider: "claude", host: null },
       { id: "claude-sonnet-5", name: "Sonnet 5", note: "balanced, fast", provider: "claude", host: null },
       { id: "claude-fable-5", name: "Fable 5", note: "Mythos-tier, extra safety layers", provider: "claude", host: null },
       { id: "claude-haiku-4-5-20251001", name: "Haiku 4.5", note: "fastest, lightweight", provider: "claude", host: null },
+      { id: "claude-opus-4-8", name: "Opus 4.8", provider: "claude", host: null, legacy: true },
       { id: "claude-sonnet-4-6", name: "Sonnet 4.6", provider: "claude", host: null, legacy: true },
       { id: "claude-opus-4-7", name: "Opus 4.7", provider: "claude", host: null, legacy: true },
       { id: "claude-opus-4-6", name: "Opus 4.6", provider: "claude", host: null, legacy: true },
@@ -1281,7 +1282,7 @@ async function runAgentLoop({ streamOneTurn, initialMessages, tools, onTextChunk
 
 const CLAUDE_MAX_TOKENS = {
   "claude-fable-5": 128000,
-  "claude-opus-4-8": 64000,
+  "claude-opus-5": 128000,
   "claude-sonnet-5": 64000,
   "claude-haiku-4-5-20251001": 64000,
 };
