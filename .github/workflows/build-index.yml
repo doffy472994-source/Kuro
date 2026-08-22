@@ -1,0 +1,57 @@
+name: Build index.html
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_branch:
+        description: "Branch containing vite/ source to build from"
+        required: false
+        default: "vite-source"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout master
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - name: Checkout vite/ source from source branch
+        run: |
+          git fetch origin ${{ inputs.source_branch }}
+          git checkout origin/${{ inputs.source_branch }} -- vite/
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: vite/package-lock.json
+
+      - name: Install dependencies
+        working-directory: vite
+        run: npm ci
+
+      - name: Build
+        working-directory: vite
+        run: npm run build
+
+      - name: Replace root index.html
+        run: cp vite/dist/index.html index.html
+
+      - name: Remove vite/ before commit
+        run: git rm -r --cached vite/ --ignore-unmatch && rm -rf vite/
+
+      - name: Commit and push to master
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add index.html
+          git diff --cached --quiet && echo "No changes to index.html" && exit 0
+          git commit -m "Rebuild index.html from ${{ inputs.source_branch }} [skip ci]"
+          git push origin HEAD:master
