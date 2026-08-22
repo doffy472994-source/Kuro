@@ -367,6 +367,17 @@ const COMPANIES = [
       { id: "groq/compound-mini", name: "Compound Mini", note: "450 t/s · agentic system", provider: "groq", host: null },
     ],
   },
+  {
+    id: "openrouter",
+    name: "OpenRouter",
+    mark: { bg: "#6467F2", fg: "#ffffff", glyph: "OR" },
+    models: [
+      { id: "stealth/ox-alpha", name: "Ox Alpha", note: "free · stealth · 1M ctx", provider: "openrouter", host: null },
+      { id: "deepseek/deepseek-chat", name: "DeepSeek Chat", note: "free · 64K ctx", provider: "openrouter", host: null },
+      { id: "qwen/qwen3-235b-a22b:free", name: "Qwen3 235B", note: "free · 131K ctx", provider: "openrouter", host: null },
+      { id: "x-ai/grok-4.6", name: "Grok 4.6", note: "via OpenRouter", provider: "openrouter", host: null },
+    ],
+  },
 ];
 
 function findModelById(id) {
@@ -1583,6 +1594,77 @@ async function streamOpenAI(messages, userName, apiKey, model, onChunk, signal, 
   }
 }
 
+async function streamOpenRouter(messages, userName, apiKey, model, onChunk, signal, toolsPromptBlock) {
+  const systemPrompt = buildBaseSystemPrompt(userName) + (toolsPromptBlock || "");
+
+  const body = {
+    model: model || "stealth/ox-alpha",
+    stream: true,
+    messages: [
+      { role: "system", content: systemPrompt },
+      ...messages.map((m) => ({ role: m.role, content: contentToOpenAIBlocks(m.content) })),
+    ],
+  };
+
+  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+      "HTTP-Referer": "https://kuro.itsricky.dev",
+      "X-Title": "Kuro",
+    },
+    signal,
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => null);
+    const msg = errBody?.error?.message || `OpenRouter request failed (${res.status})`;
+    throw new Error(msg);
+  }
+  const reader = res.body.getReader();
+  if (signal) {
+    if (signal.aborted) {
+      reader.cancel();
+      const err = new Error("Aborted");
+      err.name = "AbortError";
+      throw err;
+    }
+    signal.addEventListener("abort", () => reader.cancel(), { once: true });
+  }
+  const decoder = new TextDecoder();
+  let buf = "";
+  while (true) {
+    let done, value;
+    try {
+      ({ done, value } = await reader.read());
+    } catch (e) {
+      if (signal?.aborted) {
+        const err = new Error("Aborted");
+        err.name = "AbortError";
+        throw err;
+      }
+      throw e;
+    }
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split("\n");
+    buf = lines.pop();
+    for (const line of lines) {
+      if (!line.startsWith("data: ")) continue;
+      const data = line.slice(6).trim();
+      if (!data || data === "[DONE]") continue;
+      try {
+        const chunk = JSON.parse(data);
+        const text = chunk.choices?.[0]?.delta?.content;
+        if (text) onChunk(text);
+      } catch {
+        // ignore malformed lines, including OpenRouter's SSE comment-only keepalive pings
+      }
+    }
+  }
+}
+
 async function streamGemini(messages, userName, apiKey, model, onChunk, signal, toolsPromptBlock) {
   const systemPrompt = buildBaseSystemPrompt(userName) + (toolsPromptBlock || "");
 
@@ -1670,7 +1752,7 @@ export default function Chatbot() {
   const [loaded, setLoaded] = useState(false);
   const [userName, setUserName] = useState("");
   const [provider, setProvider] = useState("claude"); // which backend the currently-selected model uses
-  const [enabledProviders, setEnabledProviders] = useState({ claude: true, groq: false, openai: false, gemini: false }); // which backends are turned on in settings, can be multiple at once
+  const [enabledProviders, setEnabledProviders] = useState({ claude: true, groq: false, openai: false, gemini: false, openrouter: false }); // which backends are turned on in settings, can be multiple at once
   const [claudeApiKey, setClaudeApiKey] = useState("");
   const [groqApiKey, setGroqApiKey] = useState("");
   const [groqModel, setGroqModel] = useState("openai/gpt-oss-120b");
@@ -1679,6 +1761,8 @@ export default function Chatbot() {
   const [openaiModel, setOpenaiModel] = useState("gpt-5.6-terra");
   const [geminiApiKey, setGeminiApiKey] = useState("");
   const [geminiModel, setGeminiModel] = useState("gemini-3.6-flash");
+  const [openRouterApiKey, setOpenRouterApiKey] = useState("");
+  const [openRouterModel, setOpenRouterModel] = useState("stealth/ox-alpha");
   const [exaApiKey, setExaApiKey] = useState(""); // not a chat provider — powers the built-in web_search/web_fetch tools only
   const [exaKeyModalOpen, setExaKeyModalOpen] = useState(false); // popped automatically when a model tries web_search/web_fetch with no key set
   const [claudeKeyDraft, setClaudeKeyDraft] = useState("");
@@ -1689,6 +1773,8 @@ export default function Chatbot() {
   const [openaiKeySaved, setOpenaiKeySaved] = useState(false);
   const [geminiKeyDraft, setGeminiKeyDraft] = useState("");
   const [geminiKeySaved, setGeminiKeySaved] = useState(false);
+  const [openRouterKeyDraft, setOpenRouterKeyDraft] = useState("");
+  const [openRouterKeySaved, setOpenRouterKeySaved] = useState(false);
   const [exaKeyDraft, setExaKeyDraft] = useState("");
   const [exaKeySaved, setExaKeySaved] = useState(false);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
@@ -1835,6 +1921,8 @@ export default function Chatbot() {
           if (parsed.openaiModel) setOpenaiModel(parsed.openaiModel);
           if (parsed.geminiApiKey) setGeminiApiKey(parsed.geminiApiKey);
           if (parsed.geminiModel) setGeminiModel(parsed.geminiModel);
+          if (parsed.openRouterApiKey) setOpenRouterApiKey(parsed.openRouterApiKey);
+          if (parsed.openRouterModel) setOpenRouterModel(parsed.openRouterModel);
           if (parsed.exaApiKey) setExaApiKey(parsed.exaApiKey);
           if (parsed.enabledProviders)
             setEnabledProviders((prev) => ({ ...prev, ...parsed.enabledProviders }));
@@ -1884,6 +1972,8 @@ export default function Chatbot() {
       openaiModel: next.openaiModel ?? openaiModel,
       geminiApiKey: next.geminiApiKey ?? geminiApiKey,
       geminiModel: next.geminiModel ?? geminiModel,
+      openRouterApiKey: next.openRouterApiKey ?? openRouterApiKey,
+      openRouterModel: next.openRouterModel ?? openRouterModel,
       exaApiKey: next.exaApiKey ?? exaApiKey,
       enabledProviders: next.enabledProviders ?? enabledProviders,
     };
@@ -1896,6 +1986,8 @@ export default function Chatbot() {
     if (next.openaiModel !== undefined) setOpenaiModel(next.openaiModel);
     if (next.geminiApiKey !== undefined) setGeminiApiKey(next.geminiApiKey);
     if (next.geminiModel !== undefined) setGeminiModel(next.geminiModel);
+    if (next.openRouterApiKey !== undefined) setOpenRouterApiKey(next.openRouterApiKey);
+    if (next.openRouterModel !== undefined) setOpenRouterModel(next.openRouterModel);
     if (next.exaApiKey !== undefined) setExaApiKey(next.exaApiKey);
     if (next.enabledProviders !== undefined) setEnabledProviders(next.enabledProviders);
     try {
@@ -1929,11 +2021,12 @@ export default function Chatbot() {
     if (provider === "groq") return groqModel;
     if (provider === "openai") return openaiModel;
     if (provider === "gemini") return geminiModel;
+    if (provider === "openrouter") return openRouterModel;
     return null;
   }
 
   // Called when a model is picked from the composer's model picker dropdown.
-  // model.provider says which backend actually serves it (claude | groq | openai | gemini),
+  // model.provider says which backend actually serves it (claude | groq | openai | gemini | openrouter),
   // regardless of which company "owns" the model.
   function selectModel(model) {
     if (model.provider === "claude") {
@@ -1944,6 +2037,8 @@ export default function Chatbot() {
       persistProviderSettings({ provider: "openai", openaiModel: model.id });
     } else if (model.provider === "gemini") {
       persistProviderSettings({ provider: "gemini", geminiModel: model.id });
+    } else if (model.provider === "openrouter") {
+      persistProviderSettings({ provider: "openrouter", openRouterModel: model.id });
     }
     setModelMenuOpen(false);
     setModelMenuCompany(null);
@@ -2101,6 +2196,21 @@ export default function Chatbot() {
       return runAgentLoop({
         streamOneTurn: (turnMessages, onRaw) =>
           streamGemini(turnMessages, userName, geminiApiKey.trim(), geminiModel, onRaw, signal, toolsPromptBlock),
+        initialMessages: messages,
+        tools,
+        onTextChunk: onChunk,
+        onToolEvent,
+        onMissingExaKey,
+        signal,
+      });
+    }
+    if (provider === "openrouter") {
+      if (!openRouterApiKey.trim()) {
+        throw new Error("Add an OpenRouter API key in Settings first.");
+      }
+      return runAgentLoop({
+        streamOneTurn: (turnMessages, onRaw) =>
+          streamOpenRouter(turnMessages, userName, openRouterApiKey.trim(), openRouterModel, onRaw, signal, toolsPromptBlock),
         initialMessages: messages,
         tools,
         onTextChunk: onChunk,
@@ -4587,6 +4697,162 @@ export default function Chatbot() {
                 <div style={{ fontSize: 13, color: "#8a8478", lineHeight: 1.6, marginBottom: 4 }}>
                   Using {findModelById(geminiModel)?.name || geminiModel} for Gemini-backed responses. Pick a
                   different model from the chip in the message bar.
+                </div>
+              </div>
+            )}
+
+            {/* OpenRouter row */}
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                padding: "10px 4px",
+                borderTop: "1px solid #2a2622",
+                borderBottom: enabledProviders.openrouter ? "none" : "1px solid #2a2622",
+                marginTop: 4,
+              }}
+            >
+              <span
+                style={{
+                  width: 26,
+                  height: 26,
+                  borderRadius: "50%",
+                  background: "#6467F2",
+                  color: "#ffffff",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: 10.5,
+                  fontWeight: 700,
+                  flexShrink: 0,
+                }}
+              >
+                OR
+              </span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13.5, color: "#EDE9E2" }}>OpenRouter</div>
+                <div style={{ fontSize: 11.5, color: "#6b655c" }}>One key, hundreds of models — incl. Ox Alpha, free</div>
+              </div>
+              <button
+                onClick={() => toggleProviderEnabled("openrouter")}
+                title={enabledProviders.openrouter ? "Enabled — click to disable" : "Disabled — click to enable"}
+                style={{
+                  width: 34,
+                  height: 19,
+                  borderRadius: 10,
+                  border: "none",
+                  background: enabledProviders.openrouter ? "#C4623A" : "#3a3632",
+                  position: "relative",
+                  cursor: "pointer",
+                  flexShrink: 0,
+                  transition: "background 0.15s",
+                }}
+              >
+                <span
+                  style={{
+                    position: "absolute",
+                    top: 2,
+                    left: enabledProviders.openrouter ? 17 : 2,
+                    width: 15,
+                    height: 15,
+                    borderRadius: "50%",
+                    background: "#EDE9E2",
+                    transition: "left 0.15s",
+                  }}
+                />
+              </button>
+            </div>
+
+            {enabledProviders.openrouter && (
+              <div style={{ padding: "10px 4px 4px" }}>
+                <div
+                  style={{
+                    fontSize: 11.5,
+                    fontWeight: 600,
+                    letterSpacing: 0.3,
+                    color: "#6b655c",
+                    textTransform: "uppercase",
+                    marginBottom: 8,
+                  }}
+                >
+                  OpenRouter API key
+                </div>
+                <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+                  <input
+                    type="password"
+                    value={openRouterKeyDraft}
+                    onChange={(e) => {
+                      setOpenRouterKeyDraft(e.target.value);
+                      setOpenRouterKeySaved(false);
+                    }}
+                    placeholder={openRouterApiKey ? "•••••••••••••••••••• (saved)" : "sk-or-v1-…"}
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
+                      background: "#151310",
+                      border: "1px solid #3a3632",
+                      borderRadius: 8,
+                      color: "#EDE9E2",
+                      fontSize: 13,
+                      padding: "9px 10px",
+                      outline: "none",
+                      fontFamily: MONO_FONT,
+                    }}
+                  />
+                  <button
+                    onClick={() => {
+                      if (!openRouterKeyDraft.trim()) return;
+                      persistProviderSettings({ openRouterApiKey: openRouterKeyDraft.trim() });
+                      setOpenRouterKeyDraft("");
+                      setOpenRouterKeySaved(true);
+                      setTimeout(() => setOpenRouterKeySaved(false), 1800);
+                    }}
+                    style={{
+                      padding: "0 14px",
+                      borderRadius: 8,
+                      border: "none",
+                      background: "#C4623A",
+                      color: "#181614",
+                      fontSize: 13,
+                      fontWeight: 600,
+                      cursor: "pointer",
+                      flexShrink: 0,
+                    }}
+                  >
+                    Save
+                  </button>
+                </div>
+
+                {openRouterKeySaved && (
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: "#4CAF6A",
+                      marginBottom: 14,
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 5,
+                    }}
+                  >
+                    <Check size={13} /> Key saved
+                  </div>
+                )}
+                {!openRouterKeySaved && openRouterApiKey && (
+                  <div style={{ fontSize: 12, color: "#6b655c", marginBottom: 14 }}>
+                    A key is currently saved. Enter a new one to replace it.
+                  </div>
+                )}
+                {!openRouterKeySaved && !openRouterApiKey && (
+                  <div style={{ fontSize: 12, color: "#6b655c", marginBottom: 14 }}>
+                    Get a key at{" "}
+                    <span style={{ color: "#a39d92" }}>openrouter.ai/keys</span>
+                  </div>
+                )}
+
+                <div style={{ fontSize: 13, color: "#8a8478", lineHeight: 1.6, marginBottom: 4 }}>
+                  Using {findModelById(openRouterModel)?.name || openRouterModel} for OpenRouter-backed responses.
+                  Pick a different model from the chip in the message bar.
                 </div>
               </div>
             )}
