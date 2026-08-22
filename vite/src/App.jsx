@@ -1287,18 +1287,35 @@ const CLAUDE_MAX_TOKENS = {
   "claude-haiku-4-5-20251001": 64000,
 };
 
+function buildBaseSystemPrompt(userName) {
+  const now = new Date();
+  const dateStr = now.toLocaleDateString("en-US", {
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  });
+  const timeStr = now.toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  });
+  return (
+    `Your name is Kuro. If asked your name or who you are, answer as Kuro. Otherwise just be a helpful, direct general-purpose assistant.` +
+    ` The current date and time is ${dateStr}, ${timeStr}. Trust this over any date you might otherwise assume from training — your training data has a cutoff well before this date, so treat anything from web search or tool results as potentially newer than what you were trained on, and don't dismiss it as implausible just because it's unfamiliar.` +
+    (userName
+      ? ` The person you're talking to goes by "${userName}". Address them by that name when it's natural to do so, without overusing it.`
+      : "")
+  );
+}
+
 async function streamClaude(messages, userName, apiKey, onChunk, signal, toolsPromptBlock, model) {
   const resolvedModel = model || "claude-sonnet-4-6";
   const body = {
     model: resolvedModel,
     max_tokens: CLAUDE_MAX_TOKENS[resolvedModel] || 64000,
     stream: true,
-    system:
-      `Your name is Kuro. If asked your name or who you are, answer as Kuro. Otherwise just be a helpful, direct general-purpose assistant.` +
-      (userName
-        ? ` The person you're talking to goes by "${userName}". Address them by that name when it's natural to do so, without overusing it.`
-        : "") +
-      (toolsPromptBlock || ""),
+    system: buildBaseSystemPrompt(userName) + (toolsPromptBlock || ""),
     messages: messages.map((m) => ({ role: m.role, content: m.content })),
   };
 
@@ -1368,12 +1385,7 @@ async function streamClaude(messages, userName, apiKey, onChunk, signal, toolsPr
 }
 
 async function streamGroq(messages, userName, apiKey, model, onChunk, signal, toolsPromptBlock) {
-  const systemPrompt =
-    `Your name is Kuro. If asked your name or who you are, answer as Kuro. Otherwise just be a helpful, direct general-purpose assistant.` +
-    (userName
-      ? ` The person you're talking to goes by "${userName}". Address them by that name when it's natural to do so, without overusing it.`
-      : "") +
-    (toolsPromptBlock || "");
+  const systemPrompt = buildBaseSystemPrompt(userName) + (toolsPromptBlock || "");
 
   const body = {
     model: model || "openai/gpt-oss-120b",
@@ -1442,12 +1454,7 @@ async function streamGroq(messages, userName, apiKey, model, onChunk, signal, to
 }
 
 async function streamOpenAI(messages, userName, apiKey, model, onChunk, signal, toolsPromptBlock) {
-  const systemPrompt =
-    `Your name is Kuro. If asked your name or who you are, answer as Kuro. Otherwise just be a helpful, direct general-purpose assistant.` +
-    (userName
-      ? ` The person you're talking to goes by "${userName}". Address them by that name when it's natural to do so, without overusing it.`
-      : "") +
-    (toolsPromptBlock || "");
+  const systemPrompt = buildBaseSystemPrompt(userName) + (toolsPromptBlock || "");
 
   const body = {
     model: model || "gpt-5.6-terra",
@@ -1516,12 +1523,7 @@ async function streamOpenAI(messages, userName, apiKey, model, onChunk, signal, 
 }
 
 async function streamGemini(messages, userName, apiKey, model, onChunk, signal, toolsPromptBlock) {
-  const systemPrompt =
-    `Your name is Kuro. If asked your name or who you are, answer as Kuro. Otherwise just be a helpful, direct general-purpose assistant.` +
-    (userName
-      ? ` The person you're talking to goes by "${userName}". Address them by that name when it's natural to do so, without overusing it.`
-      : "") +
-    (toolsPromptBlock || "");
+  const systemPrompt = buildBaseSystemPrompt(userName) + (toolsPromptBlock || "");
 
   const body = {
     system_instruction: { parts: [{ text: systemPrompt }] },
