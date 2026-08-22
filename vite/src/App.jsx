@@ -299,6 +299,9 @@ const COMPANIES = [
       { id: "claude-sonnet-5", name: "Sonnet 5", note: "balanced, fast", provider: "claude", host: null },
       { id: "claude-fable-5", name: "Fable 5", note: "Mythos-tier, extra safety layers", provider: "claude", host: null },
       { id: "claude-haiku-4-5-20251001", name: "Haiku 4.5", note: "fastest, lightweight", provider: "claude", host: null },
+      { id: "claude-sonnet-4-6", name: "Sonnet 4.6", provider: "claude", host: null, legacy: true },
+      { id: "claude-opus-4-7", name: "Opus 4.7", provider: "claude", host: null, legacy: true },
+      { id: "claude-opus-4-6", name: "Opus 4.6", provider: "claude", host: null, legacy: true },
     ],
   },
   {
@@ -312,6 +315,8 @@ const COMPANIES = [
       { id: "openai/gpt-oss-120b", name: "GPT-OSS 120B", note: "500 t/s · 131K ctx", provider: "groq", host: "Groq" },
       { id: "openai/gpt-oss-20b", name: "GPT-OSS 20B", note: "1000 t/s · 131K ctx", provider: "groq", host: "Groq" },
       { id: "openai/gpt-oss-safeguard-20b", name: "GPT-OSS Safeguard 20B", note: "preview · moderation", provider: "groq", host: "Groq" },
+      { id: "gpt-5.5", name: "GPT-5.5", provider: "openai", host: null, legacy: true },
+      { id: "gpt-5.4", name: "GPT-5.4", provider: "openai", host: null, legacy: true },
     ],
   },
   {
@@ -323,6 +328,8 @@ const COMPANIES = [
       { id: "gemini-3.7-flash", name: "Gemini 3.7 Flash", note: "coding & agentic workflows", provider: "gemini", host: null },
       { id: "gemini-3.6-flash", name: "Gemini 3.6 Flash", note: "balanced, multimodal", provider: "gemini", host: null },
       { id: "gemini-3.5-flash-lite", name: "Gemini 3.5 Flash-Lite", note: "fastest, high-throughput", provider: "gemini", host: null },
+      { id: "gemini-3.5-flash", name: "Gemini 3.5 Flash", provider: "gemini", host: null, legacy: true },
+      { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", provider: "gemini", host: null, legacy: true },
     ],
   },
   {
@@ -3428,28 +3435,30 @@ export default function Chatbot() {
                                     if (!isSelected) e.currentTarget.style.background = "transparent";
                                   }}
                                 >
-                                  <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                  <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: m.legacy ? 12 : undefined, color: m.legacy && !isSelected ? "#8a8478" : undefined }}>
                                     {m.name}
                                     {isSelected && <Check size={12} style={{ color: "#C4623A" }} />}
                                   </span>
-                                  <span style={{ fontSize: 11, color: "#6b655c", display: "flex", alignItems: "center", gap: 5 }}>
-                                    {m.note}
-                                    {m.host && (
-                                      <span
-                                        style={{
-                                          fontSize: 9.5,
-                                          fontWeight: 600,
-                                          letterSpacing: 0.2,
-                                          color: "#F55036",
-                                          border: "1px solid #4a2a22",
-                                          borderRadius: 4,
-                                          padding: "1px 4px",
-                                        }}
-                                      >
-                                        via {m.host}
-                                      </span>
-                                    )}
-                                  </span>
+                                  {!m.legacy && (
+                                    <span style={{ fontSize: 11, color: "#6b655c", display: "flex", alignItems: "center", gap: 5 }}>
+                                      {m.note}
+                                      {m.host && (
+                                        <span
+                                          style={{
+                                            fontSize: 9.5,
+                                            fontWeight: 600,
+                                            letterSpacing: 0.2,
+                                            color: "#F55036",
+                                            border: "1px solid #4a2a22",
+                                            borderRadius: 4,
+                                            padding: "1px 4px",
+                                          }}
+                                        >
+                                          via {m.host}
+                                        </span>
+                                      )}
+                                    </span>
+                                  )}
                                 </button>
                               );
                             })}
