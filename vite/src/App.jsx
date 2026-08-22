@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Send, Plus, Trash2, MessageSquare, Menu, X, Mic, Camera, Image, FileText, Settings, MessageCirclePlus, MessageCircle, MoreHorizontal, Pencil, Check, Copy, RotateCw, Share2, Square, Plug, Monitor } from "lucide-react";
+import { Send, Plus, Trash2, MessageSquare, Menu, X, Mic, Camera, Image, FileText, Settings, MessageCirclePlus, MessageCircle, MoreHorizontal, Pencil, Check, Copy, RotateCw, Share2, Square, Plug, Monitor, Brain } from "lucide-react";
 
 // This app was originally built for an environment providing a global
 // window.storage key-value API. Outside that environment (a plain browser),
@@ -1263,7 +1263,7 @@ function scanForToolCall(buffer) {
 // onTextChunk(chunk) is called only with text that should actually render.
 // onToolEvent(event) is called with { id, toolName, serverLabel, status } so
 // the UI can show the inline shimmering status line without ending the turn.
-async function runAgentLoop({ streamOneTurn, initialMessages, tools, onTextChunk, onToolEvent, onMissingExaKey, signal }) {
+async function runAgentLoop({ streamOneTurn, initialMessages, tools, onTextChunk, onThinkingChunk, onToolEvent, onMissingExaKey, signal }) {
   let turnMessages = initialMessages;
   let roundtrips = 0;
 
@@ -1273,19 +1273,23 @@ async function runAgentLoop({ streamOneTurn, initialMessages, tools, onTextChunk
     let toolCallRaw = null;
     let toolCallResult = null;
 
-    await streamOneTurn(turnMessages, (rawChunk) => {
-      buffer += rawChunk;
-      const scan = scanForToolCall(buffer);
-      if (scan.visible) {
-        onTextChunk(scan.visible);
-        visibleSoFar += scan.visible;
-        buffer = buffer.slice(scan.visible.length);
-      }
-      if (scan.complete) {
-        toolCallResult = scan.complete;
-        toolCallRaw = buffer; // the fenced block itself, for the transcript we send back
-      }
-    });
+    await streamOneTurn(
+      turnMessages,
+      (rawChunk) => {
+        buffer += rawChunk;
+        const scan = scanForToolCall(buffer);
+        if (scan.visible) {
+          onTextChunk(scan.visible);
+          visibleSoFar += scan.visible;
+          buffer = buffer.slice(scan.visible.length);
+        }
+        if (scan.complete) {
+          toolCallResult = scan.complete;
+          toolCallRaw = buffer; // the fenced block itself, for the transcript we send back
+        }
+      },
+      onThinkingChunk
+    );
 
     if (!toolCallResult || roundtrips >= MAX_TOOL_ROUNDTRIPS) {
       return;
@@ -1374,15 +1378,20 @@ function buildBaseSystemPrompt(userName) {
   );
 }
 
-async function streamClaude(messages, userName, apiKey, onChunk, signal, toolsPromptBlock, model) {
+async function streamClaude(messages, userName, apiKey, onChunk, signal, toolsPromptBlock, model, onThinkingChunk, thinkingEnabled) {
   const resolvedModel = model || "claude-sonnet-4-6";
+  const maxTokens = CLAUDE_MAX_TOKENS[resolvedModel] || 64000;
   const body = {
     model: resolvedModel,
-    max_tokens: CLAUDE_MAX_TOKENS[resolvedModel] || 64000,
+    max_tokens: maxTokens,
     stream: true,
     system: buildBaseSystemPrompt(userName) + (toolsPromptBlock || ""),
     messages: messages.map((m) => ({ role: m.role, content: contentToClaudeBlocks(m.content) })),
   };
+  if (thinkingEnabled) {
+    // Budget must be strictly less than max_tokens — leave room for the final answer.
+    body.thinking = { type: "enabled", budget_tokens: Math.max(1024, Math.floor(maxTokens * 0.6)) };
+  }
 
   const headers = {
     "Content-Type": "application/json",
@@ -1441,6 +1450,13 @@ async function streamClaude(messages, userName, apiKey, onChunk, signal, toolsPr
           evt.delta.text
         ) {
           onChunk(evt.delta.text);
+        } else if (
+          evt.type === "content_block_delta" &&
+          evt.delta?.type === "thinking_delta" &&
+          evt.delta.thinking &&
+          onThinkingChunk
+        ) {
+          onThinkingChunk(evt.delta.thinking);
         }
       } catch {
         // ignore malformed lines
@@ -1449,7 +1465,57 @@ async function streamClaude(messages, userName, apiKey, onChunk, signal, toolsPr
   }
 }
 
-async function streamGroq(messages, userName, apiKey, model, onChunk, signal, toolsPromptBlock) {
+// Some Groq models (e.g. Qwen3.6 27B) emit reasoning inline as literal
+// <think>...</think> tags in the text stream rather than a separate field.
+// This splits an incoming stream of raw chunks into thinking vs visible text,
+// tracking state across chunk boundaries since a tag can be split mid-token.
+function createThinkTagSplitter(onVisible, onThinking) {
+  let inThinking = false;
+  let carry = ""; // holds a partial tag fragment that might complete on the next chunk
+
+  return function feed(rawChunk) {
+    let text = carry + rawChunk;
+    carry = "";
+    while (text.length > 0) {
+      if (!inThinking) {
+        const openIdx = text.indexOf("<think>");
+        if (openIdx === -1) {
+          // Check if the tail could be the start of a split "<think>" tag
+          const tailMatch = /<t(h(i(n(k)?)?)?)?$/.exec(text);
+          if (tailMatch) {
+            onVisible(text.slice(0, tailMatch.index));
+            carry = text.slice(tailMatch.index);
+          } else {
+            onVisible(text);
+          }
+          text = "";
+        } else {
+          if (openIdx > 0) onVisible(text.slice(0, openIdx));
+          text = text.slice(openIdx + "<think>".length);
+          inThinking = true;
+        }
+      } else {
+        const closeIdx = text.indexOf("</think>");
+        if (closeIdx === -1) {
+          const tailMatch = /<\/?t?h?i?n?k?$/.exec(text);
+          if (tailMatch && text.slice(tailMatch.index).length < "</think>".length) {
+            onThinking(text.slice(0, tailMatch.index));
+            carry = text.slice(tailMatch.index);
+          } else {
+            onThinking(text);
+          }
+          text = "";
+        } else {
+          if (closeIdx > 0) onThinking(text.slice(0, closeIdx));
+          text = text.slice(closeIdx + "</think>".length);
+          inThinking = false;
+        }
+      }
+    }
+  };
+}
+
+async function streamGroq(messages, userName, apiKey, model, onChunk, signal, toolsPromptBlock, onThinkingChunk) {
   const systemPrompt = buildBaseSystemPrompt(userName) + (toolsPromptBlock || "");
   const resolvedModel = model || "openai/gpt-oss-120b";
   const hasImages = messages.some((m) => Array.isArray(m.content) && m.content.some((p) => p.type === "image"));
@@ -1494,6 +1560,7 @@ async function streamGroq(messages, userName, apiKey, model, onChunk, signal, to
   }
   const decoder = new TextDecoder();
   let buf = "";
+  const feedGroq = createThinkTagSplitter(onChunk, onThinkingChunk || (() => {}));
   while (true) {
     let done, value;
     try {
@@ -1517,7 +1584,7 @@ async function streamGroq(messages, userName, apiKey, model, onChunk, signal, to
       try {
         const chunk = JSON.parse(data);
         const text = chunk.choices?.[0]?.delta?.content;
-        if (text) onChunk(text);
+        if (text) feedGroq(text);
       } catch {
         // ignore malformed lines
       }
@@ -1594,17 +1661,23 @@ async function streamOpenAI(messages, userName, apiKey, model, onChunk, signal, 
   }
 }
 
-async function streamOpenRouter(messages, userName, apiKey, model, onChunk, signal, toolsPromptBlock) {
+async function streamOpenRouter(messages, userName, apiKey, model, onChunk, signal, toolsPromptBlock, onThinkingChunk, thinkingEnabled) {
   const systemPrompt = buildBaseSystemPrompt(userName) + (toolsPromptBlock || "");
+  const resolvedModel = model || "stealth/ox-alpha";
 
   const body = {
-    model: model || "stealth/ox-alpha",
+    model: resolvedModel,
     stream: true,
     messages: [
       { role: "system", content: systemPrompt },
       ...messages.map((m) => ({ role: m.role, content: contentToOpenAIBlocks(m.content) })),
     ],
   };
+  // Some OpenRouter models (e.g. stealth/ox-alpha) have mandatory reasoning and
+  // ignore/reject an absent config; others only reason when asked. Passing
+  // "low" when the toggle is off keeps cost/latency down without erroring on
+  // mandatory-reasoning models, and "high" gives a real, visible chain when on.
+  body.reasoning = { effort: thinkingEnabled ? "high" : "low" };
 
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
@@ -1656,8 +1729,14 @@ async function streamOpenRouter(messages, userName, apiKey, model, onChunk, sign
       if (!data || data === "[DONE]") continue;
       try {
         const chunk = JSON.parse(data);
-        const text = chunk.choices?.[0]?.delta?.content;
-        if (text) onChunk(text);
+        const delta = chunk.choices?.[0]?.delta;
+        const reasoningText =
+          delta?.reasoning ||
+          (Array.isArray(delta?.reasoning_details)
+            ? delta.reasoning_details.map((d) => d.text || d.summary || "").join("")
+            : "");
+        if (reasoningText && onThinkingChunk) onThinkingChunk(reasoningText);
+        if (delta?.content) onChunk(delta.content);
       } catch {
         // ignore malformed lines, including OpenRouter's SSE comment-only keepalive pings
       }
@@ -1665,7 +1744,7 @@ async function streamOpenRouter(messages, userName, apiKey, model, onChunk, sign
   }
 }
 
-async function streamGemini(messages, userName, apiKey, model, onChunk, signal, toolsPromptBlock) {
+async function streamGemini(messages, userName, apiKey, model, onChunk, signal, toolsPromptBlock, onThinkingChunk, thinkingEnabled) {
   const systemPrompt = buildBaseSystemPrompt(userName) + (toolsPromptBlock || "");
 
   const body = {
@@ -1677,6 +1756,9 @@ async function streamGemini(messages, userName, apiKey, model, onChunk, signal, 
         parts: contentToGeminiParts(m.content),
       })),
   };
+  if (thinkingEnabled) {
+    body.generationConfig = { thinkingConfig: { includeThoughts: true } };
+  }
 
   const modelId = model || "gemini-3.6-flash";
   const res = await fetch(
@@ -1730,8 +1812,15 @@ async function streamGemini(messages, userName, apiKey, model, onChunk, signal, 
       if (!data) continue;
       try {
         const chunk = JSON.parse(data);
-        const text = chunk.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("");
-        if (text) onChunk(text);
+        const parts = chunk.candidates?.[0]?.content?.parts || [];
+        for (const p of parts) {
+          if (!p.text) continue;
+          if (p.thought) {
+            if (onThinkingChunk) onThinkingChunk(p.text);
+          } else {
+            onChunk(p.text);
+          }
+        }
       } catch {
         // ignore malformed lines
       }
@@ -1744,6 +1833,7 @@ export default function Chatbot() {
   const [activeId, setActiveId] = useState(null);
   const [input, setInput] = useState("");
   const [pendingImages, setPendingImages] = useState([]); // [{ id, dataUrl, mimeType, name }] — images attached but not yet sent
+  const [thinkingEnabled, setThinkingEnabled] = useState(true); // reasoning/thinking toggle, on by default per user preference
   const [imageError, setImageError] = useState(null);
   const cameraInputRef = useRef(null);
   const photosInputRef = useRef(null);
@@ -1923,6 +2013,7 @@ export default function Chatbot() {
           if (parsed.geminiModel) setGeminiModel(parsed.geminiModel);
           if (parsed.openRouterApiKey) setOpenRouterApiKey(parsed.openRouterApiKey);
           if (parsed.openRouterModel) setOpenRouterModel(parsed.openRouterModel);
+          if (parsed.thinkingEnabled !== undefined) setThinkingEnabled(parsed.thinkingEnabled);
           if (parsed.exaApiKey) setExaApiKey(parsed.exaApiKey);
           if (parsed.enabledProviders)
             setEnabledProviders((prev) => ({ ...prev, ...parsed.enabledProviders }));
@@ -1974,6 +2065,7 @@ export default function Chatbot() {
       geminiModel: next.geminiModel ?? geminiModel,
       openRouterApiKey: next.openRouterApiKey ?? openRouterApiKey,
       openRouterModel: next.openRouterModel ?? openRouterModel,
+      thinkingEnabled: next.thinkingEnabled ?? thinkingEnabled,
       exaApiKey: next.exaApiKey ?? exaApiKey,
       enabledProviders: next.enabledProviders ?? enabledProviders,
     };
@@ -1988,6 +2080,7 @@ export default function Chatbot() {
     if (next.geminiModel !== undefined) setGeminiModel(next.geminiModel);
     if (next.openRouterApiKey !== undefined) setOpenRouterApiKey(next.openRouterApiKey);
     if (next.openRouterModel !== undefined) setOpenRouterModel(next.openRouterModel);
+    if (next.thinkingEnabled !== undefined) setThinkingEnabled(next.thinkingEnabled);
     if (next.exaApiKey !== undefined) setExaApiKey(next.exaApiKey);
     if (next.enabledProviders !== undefined) setEnabledProviders(next.enabledProviders);
     try {
@@ -2154,7 +2247,7 @@ export default function Chatbot() {
 
   const active = activeId ? conversations[activeId] : null;
 
-  async function streamReply(messages, onChunk, onToolEvent, signal) {
+  async function streamReply(messages, onChunk, onToolEvent, signal, onThinkingChunk) {
     const tools = await getAllTools(mcpServers, signal, exaApiKey);
     const toolsPromptBlock = buildToolsPromptBlock(tools);
     const onMissingExaKey = () => setExaKeyModalOpen(true);
@@ -2164,11 +2257,12 @@ export default function Chatbot() {
         throw new Error("Add a Groq API key in Settings first.");
       }
       return runAgentLoop({
-        streamOneTurn: (turnMessages, onRaw) =>
-          streamGroq(turnMessages, userName, groqApiKey.trim(), groqModel, onRaw, signal, toolsPromptBlock),
+        streamOneTurn: (turnMessages, onRaw, onThinkRaw) =>
+          streamGroq(turnMessages, userName, groqApiKey.trim(), groqModel, onRaw, signal, toolsPromptBlock, onThinkRaw),
         initialMessages: messages,
         tools,
         onTextChunk: onChunk,
+        onThinkingChunk,
         onToolEvent,
         onMissingExaKey,
         signal,
@@ -2194,11 +2288,12 @@ export default function Chatbot() {
         throw new Error("Add a Gemini API key in Settings first.");
       }
       return runAgentLoop({
-        streamOneTurn: (turnMessages, onRaw) =>
-          streamGemini(turnMessages, userName, geminiApiKey.trim(), geminiModel, onRaw, signal, toolsPromptBlock),
+        streamOneTurn: (turnMessages, onRaw, onThinkRaw) =>
+          streamGemini(turnMessages, userName, geminiApiKey.trim(), geminiModel, onRaw, signal, toolsPromptBlock, onThinkRaw, thinkingEnabled),
         initialMessages: messages,
         tools,
         onTextChunk: onChunk,
+        onThinkingChunk,
         onToolEvent,
         onMissingExaKey,
         signal,
@@ -2209,11 +2304,12 @@ export default function Chatbot() {
         throw new Error("Add an OpenRouter API key in Settings first.");
       }
       return runAgentLoop({
-        streamOneTurn: (turnMessages, onRaw) =>
-          streamOpenRouter(turnMessages, userName, openRouterApiKey.trim(), openRouterModel, onRaw, signal, toolsPromptBlock),
+        streamOneTurn: (turnMessages, onRaw, onThinkRaw) =>
+          streamOpenRouter(turnMessages, userName, openRouterApiKey.trim(), openRouterModel, onRaw, signal, toolsPromptBlock, onThinkRaw, thinkingEnabled),
         initialMessages: messages,
         tools,
         onTextChunk: onChunk,
+        onThinkingChunk,
         onToolEvent,
         onMissingExaKey,
         signal,
@@ -2223,11 +2319,12 @@ export default function Chatbot() {
       throw new Error("Add an Anthropic API key in Settings first.");
     }
     return runAgentLoop({
-      streamOneTurn: (turnMessages, onRaw) =>
-        streamClaude(turnMessages, userName, claudeApiKey.trim(), onRaw, signal, toolsPromptBlock, claudeModel),
+      streamOneTurn: (turnMessages, onRaw, onThinkRaw) =>
+        streamClaude(turnMessages, userName, claudeApiKey.trim(), onRaw, signal, toolsPromptBlock, claudeModel, onThinkRaw, thinkingEnabled),
       initialMessages: messages,
       tools,
       onTextChunk: onChunk,
+      onThinkingChunk,
       onToolEvent,
       onMissingExaKey,
       signal,
@@ -2305,7 +2402,7 @@ export default function Chatbot() {
 
     // Add a streaming placeholder for the assistant reply
     const assistantId = uid();
-    const assistantPlaceholder = { role: "assistant", content: "", id: assistantId, streaming: true, toolEvents: [] };
+    const assistantPlaceholder = { role: "assistant", content: "", thinking: "", id: assistantId, streaming: true, toolEvents: [] };
     const withPlaceholder = {
       ...withUser,
       messages: [...withUser.messages, assistantPlaceholder],
@@ -2316,6 +2413,7 @@ export default function Chatbot() {
     setLoading(true);
 
     let accumulated = "";
+    let accumulatedThinking = "";
     const toolEvents = [];
     const controller = new AbortController();
     abortRef.current = controller;
@@ -2350,7 +2448,18 @@ export default function Chatbot() {
             return { ...prev, [convoId]: { ...convo, messages: msgs } };
           });
         },
-        controller.signal
+        controller.signal,
+        (thinkChunk) => {
+          accumulatedThinking += thinkChunk;
+          setConversations((prev) => {
+            const convo = prev[convoId];
+            if (!convo) return prev;
+            const msgs = convo.messages.map((m) =>
+              m.id === assistantId ? { ...m, thinking: accumulatedThinking } : m
+            );
+            return { ...prev, [convoId]: { ...convo, messages: msgs } };
+          });
+        }
       );
     } catch (e) {
       if (e.name !== "AbortError") {
@@ -2364,7 +2473,7 @@ export default function Chatbot() {
         if (!convo) return prev;
         const msgs = convo.messages.map((m) =>
           m.id === assistantId
-            ? { role: "assistant", content: accumulated || "…", id: assistantId, toolEvents }
+            ? { role: "assistant", content: accumulated || "…", thinking: accumulatedThinking || undefined, id: assistantId, toolEvents }
             : m
         );
         const finalConvo = { ...convo, messages: msgs, updatedAt: Date.now() };
@@ -2387,7 +2496,7 @@ export default function Chatbot() {
     setError(null);
     const convoId = active.id;
     const assistantId = uid();
-    const placeholder = { role: "assistant", content: "", id: assistantId, streaming: true, toolEvents: [] };
+    const placeholder = { role: "assistant", content: "", thinking: "", id: assistantId, streaming: true, toolEvents: [] };
     const withPlaceholder = { ...active, messages: [...priorMessages, placeholder] };
     let updatedAll = { ...conversations, [convoId]: withPlaceholder };
     setConversations(updatedAll);
@@ -2395,6 +2504,7 @@ export default function Chatbot() {
     setLoading(true);
 
     let accumulated = "";
+    let accumulatedThinking = "";
     const toolEvents = [];
     const controller = new AbortController();
     abortRef.current = controller;
@@ -2426,7 +2536,18 @@ export default function Chatbot() {
             return { ...prev, [convoId]: { ...convo, messages: msgs } };
           });
         },
-        controller.signal
+        controller.signal,
+        (thinkChunk) => {
+          accumulatedThinking += thinkChunk;
+          setConversations((prev) => {
+            const convo = prev[convoId];
+            if (!convo) return prev;
+            const msgs = convo.messages.map((m) =>
+              m.id === assistantId ? { ...m, thinking: accumulatedThinking } : m
+            );
+            return { ...prev, [convoId]: { ...convo, messages: msgs } };
+          });
+        }
       );
     } catch (e) {
       if (e.name !== "AbortError") {
@@ -2439,7 +2560,7 @@ export default function Chatbot() {
         if (!convo) return prev;
         const msgs = convo.messages.map((m) =>
           m.id === assistantId
-            ? { role: "assistant", content: accumulated || "…", id: assistantId, toolEvents }
+            ? { role: "assistant", content: accumulated || "…", thinking: accumulatedThinking || undefined, id: assistantId, toolEvents }
             : m
         );
         const finalConvo = { ...convo, messages: msgs, updatedAt: Date.now() };
@@ -3152,7 +3273,27 @@ export default function Chatbot() {
                   }}
                 >
                   {m.role === "assistant" ? (
-                    <AssistantContent content={m.content} toolEvents={m.toolEvents} />
+                    <>
+                      {m.thinking && (
+                        <div
+                          style={{
+                            fontFamily: UI_FONT,
+                            fontSize: 13,
+                            fontStyle: "italic",
+                            color: "#7a746a",
+                            lineHeight: 1.55,
+                            whiteSpace: "pre-wrap",
+                            wordBreak: "break-word",
+                            marginBottom: 10,
+                            paddingLeft: 10,
+                            borderLeft: "2px solid #37322c",
+                          }}
+                        >
+                          {m.thinking}
+                        </div>
+                      )}
+                      <AssistantContent content={m.content} toolEvents={m.toolEvents} />
+                    </>
                   ) : Array.isArray(m.content) ? (
                     <>
                       {m.content
@@ -3578,6 +3719,58 @@ export default function Chatbot() {
                         <FileText size={16} style={{ opacity: 0.75 }} />
                         Files
                       </button>
+                    </div>
+                    <div
+                      style={{
+                        borderTop: "1px solid #2a2622",
+                        padding: 6,
+                      }}
+                    >
+                      <div
+                        style={{
+                          width: "100%",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 10,
+                          padding: "9px 10px",
+                        }}
+                      >
+                        <span style={{ opacity: 0.75, display: "flex" }}>
+                          <Brain size={16} />
+                        </span>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 13.5, color: "#EDE9E2" }}>Thinking</div>
+                          <div style={{ fontSize: 11, color: "#6b655c" }}>Show reasoning when the model supports it</div>
+                        </div>
+                        <button
+                          onClick={() => persistProviderSettings({ thinkingEnabled: !thinkingEnabled })}
+                          title={thinkingEnabled ? "Enabled — click to disable" : "Disabled — click to enable"}
+                          style={{
+                            width: 34,
+                            height: 19,
+                            borderRadius: 10,
+                            border: "none",
+                            background: thinkingEnabled ? "#C4623A" : "#3a3632",
+                            position: "relative",
+                            cursor: "pointer",
+                            flexShrink: 0,
+                            transition: "background 0.15s",
+                          }}
+                        >
+                          <span
+                            style={{
+                              position: "absolute",
+                              top: 2,
+                              left: thinkingEnabled ? 17 : 2,
+                              width: 15,
+                              height: 15,
+                              borderRadius: "50%",
+                              background: "#EDE9E2",
+                              transition: "left 0.15s",
+                            }}
+                          />
+                        </button>
+                      </div>
                     </div>
                   </div>
                 )}
