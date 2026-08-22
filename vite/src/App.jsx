@@ -1272,10 +1272,18 @@ async function runAgentLoop({ streamOneTurn, initialMessages, tools, onTextChunk
   }
 }
 
+const CLAUDE_MAX_TOKENS = {
+  "claude-fable-5": 128000,
+  "claude-opus-4-8": 64000,
+  "claude-sonnet-5": 64000,
+  "claude-haiku-4-5-20251001": 64000,
+};
+
 async function streamClaude(messages, userName, apiKey, onChunk, signal, toolsPromptBlock, model) {
+  const resolvedModel = model || "claude-sonnet-4-6";
   const body = {
-    model: model || "claude-sonnet-4-6",
-    max_tokens: 1000,
+    model: resolvedModel,
+    max_tokens: CLAUDE_MAX_TOKENS[resolvedModel] || 64000,
     stream: true,
     system:
       `Your name is Kuro. If asked your name or who you are, answer as Kuro. Otherwise just be a helpful, direct general-purpose assistant.` +
