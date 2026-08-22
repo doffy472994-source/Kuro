@@ -44,6 +44,9 @@ jobs:
       - name: Replace root index.html
         run: cp vite/dist/index.html index.html
 
+      - name: Copy favicon.svg from dist
+        run: cp vite/dist/favicon.svg favicon.svg || true
+
       - name: Remove vite/ before commit
         run: git rm -r --cached vite/ --ignore-unmatch && rm -rf vite/
 
@@ -51,7 +54,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add index.html
-          git diff --cached --quiet && echo "No changes to index.html" && exit 0
+          git add index.html favicon.svg
+          git diff --cached --quiet && echo "No changes" && exit 0
           git commit -m "Rebuild index.html from ${{ inputs.source_branch }} [skip ci]"
           git push origin HEAD:master
