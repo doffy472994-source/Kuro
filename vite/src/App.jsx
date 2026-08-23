@@ -3,26 +3,68 @@ import { Send, Plus, Trash2, MessageSquare, Menu, X, Mic, Camera, Image, FileTex
 
 // This app was originally built for an environment providing a global
 // window.storage key-value API. Outside that environment (a plain browser),
-// this shim backs the same get/set interface with localStorage so every
-// call site below works unmodified.
+// this shim backs the same get/set interface with IndexedDB so every
+// call site below works unmodified. IndexedDB has no practical size limit,
+// unlike localStorage's ~5MB cap which silently drops writes when exceeded.
 if (typeof window !== "undefined" && !window.storage) {
+  const DB_NAME = "kuro";
+  const DB_VERSION = 1;
+  const STORE = "kv";
+
+  let _db = null;
+  function openDb() {
+    if (_db) return Promise.resolve(_db);
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(DB_NAME, DB_VERSION);
+      req.onupgradeneeded = (e) => {
+        e.target.result.createObjectStore(STORE);
+      };
+      req.onsuccess = (e) => {
+        _db = e.target.result;
+        resolve(_db);
+      };
+      req.onerror = () => reject(req.error);
+    });
+  }
+
   window.storage = {
     async get(key) {
-      const raw = localStorage.getItem(key);
-      if (raw === null) return null;
-      return { key, value: raw };
+      const db = await openDb();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE, "readonly");
+        const req = tx.objectStore(STORE).get(key);
+        req.onsuccess = () =>
+          resolve(req.result !== undefined ? { key, value: req.result } : null);
+        req.onerror = () => reject(req.error);
+      });
     },
     async set(key, value) {
-      localStorage.setItem(key, value);
-      return { key, value };
+      const db = await openDb();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE, "readwrite");
+        tx.objectStore(STORE).put(value, key);
+        tx.oncomplete = () => resolve({ key, value });
+        tx.onerror = () => reject(tx.error);
+      });
     },
     async delete(key) {
-      localStorage.removeItem(key);
-      return { key, deleted: true };
+      const db = await openDb();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE, "readwrite");
+        tx.objectStore(STORE).delete(key);
+        tx.oncomplete = () => resolve({ key, deleted: true });
+        tx.onerror = () => reject(tx.error);
+      });
     },
     async list(prefix = "") {
-      const keys = Object.keys(localStorage).filter((k) => k.startsWith(prefix));
-      return { keys };
+      const db = await openDb();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE, "readonly");
+        const req = tx.objectStore(STORE).getAllKeys();
+        req.onsuccess = () =>
+          resolve({ keys: req.result.filter((k) => k.startsWith(prefix)) });
+        req.onerror = () => reject(req.error);
+      });
     },
   };
 }
@@ -1985,10 +2027,30 @@ export default function Chatbot() {
     }
   }, [modelMenuOpen]);
 
+  // One-time migration: move any existing data from localStorage into IndexedDB
+  // so conversations aren't lost on the first load after this update.
+  async function migrateFromLocalStorage() {
+    const keys = ["conversations", "userName", "providerSettings", "mcpServers"];
+    for (const key of keys) {
+      try {
+        const existing = await window.storage.get(key);
+        if (existing) continue; // already in IndexedDB, skip
+        const raw = localStorage.getItem(key);
+        if (raw !== null) {
+          await window.storage.set(key, raw);
+          localStorage.removeItem(key); // clean up after migration
+        }
+      } catch {
+        // ignore per-key errors, best-effort migration
+      }
+    }
+  }
+
   // Load conversations from storage on mount
   useEffect(() => {
     (async () => {
       try {
+        await migrateFromLocalStorage();
         const result = await window.storage.get("conversations");
         if (result && result.value) {
           const parsed = JSON.parse(result.value);
