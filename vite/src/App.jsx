@@ -2435,6 +2435,30 @@ export default function Chatbot() {
     const toolEvents = [];
     const controller = new AbortController();
     abortRef.current = controller;
+
+    // Persist in-progress response periodically so a refresh doesn't lose it.
+    // We debounce at 2s rather than every token to avoid hammering storage.
+    let persistTimer = null;
+    const debouncedPersist = () => {
+      if (persistTimer) clearTimeout(persistTimer);
+      persistTimer = setTimeout(() => {
+        setConversations((prev) => {
+          const convo = prev[convoId];
+          if (!convo) return prev;
+          // Save current accumulated state but without the streaming flag —
+          // if the user refreshes they'll see the partial response as complete.
+          const msgs = convo.messages.map((m) =>
+            m.id === assistantId
+              ? { role: "assistant", content: accumulated || "…", thinking: accumulatedThinking || undefined, id: assistantId, toolEvents }
+              : m
+          );
+          const snapshot = { ...convo, messages: msgs, updatedAt: Date.now() };
+          persist({ ...prev, [convoId]: snapshot });
+          return prev; // don't change React state, just persist
+        });
+      }, 2000);
+    };
+
     try {
       await streamReply(
         withUser.messages,
@@ -2448,6 +2472,7 @@ export default function Chatbot() {
             );
             return { ...prev, [convoId]: { ...convo, messages: msgs } };
           });
+          debouncedPersist();
         },
         (event) => {
           // Tool events are inserted at the current text length so the renderer
@@ -2484,6 +2509,7 @@ export default function Chatbot() {
         setError(e.message || "Couldn't reach Kuro. Try sending that again.");
       }
     } finally {
+      if (persistTimer) clearTimeout(persistTimer);
       abortRef.current = null;
       // Finalize: remove streaming flag, persist
       setConversations((prev) => {
