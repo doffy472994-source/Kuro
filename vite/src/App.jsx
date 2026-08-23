@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Send, Plus, Trash2, MessageSquare, Menu, X, Mic, Camera, Image, FileText, Settings, MessageCirclePlus, MessageCircle, MoreHorizontal, Pencil, Check, Copy, RotateCw, Share2, Square, Plug, Monitor, Brain } from "lucide-react";
-
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 // This app was originally built for an environment providing a global
 // window.storage key-value API. Outside that environment (a plain browser),
 // this shim backs the same get/set interface with IndexedDB so every
@@ -497,223 +498,161 @@ function nowLabel() {
   });
 }
 
-// --- Lightweight markdown renderer (no external deps) ---
-
-function renderInline(text, keyPrefix) {
-  // Handles: **bold**, *italic*/_italic_, `code`, [text](url)
-  const nodes = [];
-  let remaining = text;
-  let key = 0;
-  const pattern = /(\*\*(.+?)\*\*|`([^`]+?)`|\[([^\]]+)\]\(([^)]+)\)|\*(?!\*)(.+?)\*|_(.+?)_)/;
-
-  while (remaining.length > 0) {
-    const m = pattern.exec(remaining);
-    if (!m) {
-      nodes.push(remaining);
-      break;
-    }
-    if (m.index > 0) nodes.push(remaining.slice(0, m.index));
-
-    if (m[2] !== undefined) {
-      nodes.push(<strong key={`${keyPrefix}-b${key++}`}>{m[2]}</strong>);
-    } else if (m[3] !== undefined) {
-      nodes.push(
-        <code
-          key={`${keyPrefix}-c${key++}`}
-          style={{
-            fontFamily: MONO_FONT,
-            fontSize: "0.88em",
-            background: "#2a251f",
-            padding: "1px 5px",
-            borderRadius: 4,
-          }}
-        >
-          {m[3]}
-        </code>
-      );
-    } else if (m[4] !== undefined && m[5] !== undefined) {
-      nodes.push(
-        <a
-          key={`${keyPrefix}-a${key++}`}
-          href={m[5]}
-          target="_blank"
-          rel="noopener noreferrer"
-          style={{ color: "#C4623A", textDecoration: "underline" }}
-        >
-          {m[4]}
-        </a>
-      );
-    } else if (m[6] !== undefined || m[7] !== undefined) {
-      nodes.push(<em key={`${keyPrefix}-i${key++}`}>{m[6] ?? m[7]}</em>);
-    }
-
-    remaining = remaining.slice(m.index + m[0].length);
-  }
-  return nodes;
-}
+// --- Markdown renderer (react-markdown + remark-gfm) ---
 
 function Markdown({ text }) {
   if (!text) return null;
-
-  const lines = text.split("\n");
-  const blocks = [];
-  let i = 0;
-  let blockKey = 0;
-
-  while (i < lines.length) {
-    const line = lines[i];
-
-    // Fenced code block
-    const fenceMatch = line.match(/^```(\w*)\s*$/);
-    if (fenceMatch) {
-      const lang = fenceMatch[1];
-      const codeLines = [];
-      i++;
-      while (i < lines.length && !/^```\s*$/.test(lines[i])) {
-        codeLines.push(lines[i]);
-        i++;
-      }
-      i++; // skip closing fence
-      blocks.push(
-        <pre
-          key={`blk-${blockKey++}`}
-          style={{
-            background: "#151310",
-            border: "1px solid #2a2622",
-            borderRadius: 10,
-            padding: "12px 14px",
-            overflowX: "auto",
-            margin: "8px 0",
-          }}
-        >
-          <code
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={{
+        p: ({ children }) => (
+          <p style={{ margin: "0 0 4px", lineHeight: 1.6 }}>{children}</p>
+        ),
+        strong: ({ children }) => <strong>{children}</strong>,
+        em: ({ children }) => <em>{children}</em>,
+        a: ({ href, children }) => (
+          <a
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: "#C4623A", textDecoration: "underline" }}
+          >
+            {children}
+          </a>
+        ),
+        code: ({ inline, className, children }) => {
+          if (inline) {
+            return (
+              <code
+                style={{
+                  fontFamily: MONO_FONT,
+                  fontSize: "0.88em",
+                  background: "#2a251f",
+                  padding: "1px 5px",
+                  borderRadius: 4,
+                }}
+              >
+                {children}
+              </code>
+            );
+          }
+          return (
+            <pre
+              style={{
+                background: "#151310",
+                border: "1px solid #2a2622",
+                borderRadius: 10,
+                padding: "12px 14px",
+                overflowX: "auto",
+                margin: "8px 0",
+              }}
+            >
+              <code
+                style={{
+                  fontFamily: MONO_FONT,
+                  fontSize: 13,
+                  lineHeight: 1.55,
+                  color: "#EDE9E2",
+                  whiteSpace: "pre",
+                }}
+              >
+                {children}
+              </code>
+            </pre>
+          );
+        },
+        pre: ({ children }) => <>{children}</>,
+        h1: ({ children }) => (
+          <div style={{ fontSize: 20, fontWeight: 600, margin: "14px 0 6px" }}>{children}</div>
+        ),
+        h2: ({ children }) => (
+          <div style={{ fontSize: 18, fontWeight: 600, margin: "14px 0 6px" }}>{children}</div>
+        ),
+        h3: ({ children }) => (
+          <div style={{ fontSize: 16.5, fontWeight: 600, margin: "10px 0 4px" }}>{children}</div>
+        ),
+        h4: ({ children }) => (
+          <div style={{ fontSize: 15.5, fontWeight: 600, margin: "10px 0 4px" }}>{children}</div>
+        ),
+        ul: ({ children }) => (
+          <ul style={{ margin: "6px 0", paddingLeft: 22 }}>{children}</ul>
+        ),
+        ol: ({ children }) => (
+          <ol style={{ margin: "6px 0", paddingLeft: 22 }}>{children}</ol>
+        ),
+        li: ({ children }) => (
+          <li style={{ marginBottom: 3 }}>{children}</li>
+        ),
+        blockquote: ({ children }) => (
+          <div
             style={{
-              fontFamily: MONO_FONT,
-              fontSize: 13,
-              lineHeight: 1.55,
-              color: "#EDE9E2",
-              whiteSpace: "pre",
+              borderLeft: "3px solid #3a3632",
+              paddingLeft: 12,
+              margin: "8px 0",
+              color: "#a39d92",
             }}
           >
-            {codeLines.join("\n")}
-          </code>
-        </pre>
-      );
-      continue;
-    }
-
-    // Blank line
-    if (line.trim() === "") {
-      i++;
-      continue;
-    }
-
-    // Heading
-    const headingMatch = line.match(/^(#{1,4})\s+(.*)$/);
-    if (headingMatch) {
-      const level = headingMatch[1].length;
-      const sizes = { 1: 20, 2: 18, 3: 16.5, 4: 15.5 };
-      blocks.push(
-        <div
-          key={`blk-${blockKey++}`}
-          style={{
-            fontSize: sizes[level],
-            fontWeight: 600,
-            margin: level <= 2 ? "14px 0 6px" : "10px 0 4px",
-          }}
-        >
-          {renderInline(headingMatch[2], `h${blockKey}`)}
-        </div>
-      );
-      i++;
-      continue;
-    }
-
-    // Blockquote
-    if (/^>\s?/.test(line)) {
-      const quoteLines = [];
-      while (i < lines.length && /^>\s?/.test(lines[i])) {
-        quoteLines.push(lines[i].replace(/^>\s?/, ""));
-        i++;
-      }
-      blocks.push(
-        <div
-          key={`blk-${blockKey++}`}
-          style={{
-            borderLeft: "3px solid #3a3632",
-            paddingLeft: 12,
-            margin: "8px 0",
-            color: "#a39d92",
-          }}
-        >
-          {quoteLines.map((ql, idx) => (
-            <div key={idx}>{renderInline(ql, `bq${blockKey}-${idx}`)}</div>
-          ))}
-        </div>
-      );
-      continue;
-    }
-
-    // Unordered list
-    if (/^[-*]\s+/.test(line)) {
-      const items = [];
-      while (i < lines.length && /^[-*]\s+/.test(lines[i])) {
-        items.push(lines[i].replace(/^[-*]\s+/, ""));
-        i++;
-      }
-      blocks.push(
-        <ul key={`blk-${blockKey++}`} style={{ margin: "6px 0", paddingLeft: 22 }}>
-          {items.map((it, idx) => (
-            <li key={idx} style={{ marginBottom: 3 }}>
-              {renderInline(it, `ul${blockKey}-${idx}`)}
-            </li>
-          ))}
-        </ul>
-      );
-      continue;
-    }
-
-    // Ordered list
-    if (/^\d+\.\s+/.test(line)) {
-      const items = [];
-      while (i < lines.length && /^\d+\.\s+/.test(lines[i])) {
-        items.push(lines[i].replace(/^\d+\.\s+/, ""));
-        i++;
-      }
-      blocks.push(
-        <ol key={`blk-${blockKey++}`} style={{ margin: "6px 0", paddingLeft: 22 }}>
-          {items.map((it, idx) => (
-            <li key={idx} style={{ marginBottom: 3 }}>
-              {renderInline(it, `ol${blockKey}-${idx}`)}
-            </li>
-          ))}
-        </ol>
-      );
-      continue;
-    }
-
-    // Paragraph (consume consecutive plain lines)
-    const paraLines = [];
-    while (
-      i < lines.length &&
-      lines[i].trim() !== "" &&
-      !/^```/.test(lines[i]) &&
-      !/^(#{1,4})\s+/.test(lines[i]) &&
-      !/^>\s?/.test(lines[i]) &&
-      !/^[-*]\s+/.test(lines[i]) &&
-      !/^\d+\.\s+/.test(lines[i])
-    ) {
-      paraLines.push(lines[i]);
-      i++;
-    }
-    blocks.push(
-      <div key={`blk-${blockKey++}`} style={{ margin: "0 0 4px" }}>
-        {renderInline(paraLines.join("\n"), `p${blockKey}`)}
-      </div>
-    );
-  }
-
-  return <>{blocks}</>;
+            {children}
+          </div>
+        ),
+        hr: () => (
+          <hr style={{ border: "none", borderTop: "1px solid #2a2622", margin: "12px 0" }} />
+        ),
+        table: ({ children }) => (
+          <div style={{ overflowX: "auto", margin: "10px 0" }}>
+            <table
+              style={{
+                borderCollapse: "collapse",
+                width: "100%",
+                fontSize: 13.5,
+                fontFamily: UI_FONT,
+              }}
+            >
+              {children}
+            </table>
+          </div>
+        ),
+        thead: ({ children }) => (
+          <thead style={{ borderBottom: "2px solid #3a3632" }}>{children}</thead>
+        ),
+        tbody: ({ children }) => <tbody>{children}</tbody>,
+        tr: ({ children }) => (
+          <tr
+            style={{ borderBottom: "1px solid #2a2622" }}
+          >
+            {children}
+          </tr>
+        ),
+        th: ({ children }) => (
+          <th
+            style={{
+              padding: "7px 12px",
+              textAlign: "left",
+              fontWeight: 600,
+              color: "#EDE9E2",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {children}
+          </th>
+        ),
+        td: ({ children }) => (
+          <td
+            style={{
+              padding: "6px 12px",
+              color: "#c8c2b8",
+              verticalAlign: "top",
+            }}
+          >
+            {children}
+          </td>
+        ),
+      }}
+    >
+      {text}
+    </ReactMarkdown>
+  );
 }
 
 // Inline, in-flow marker for a tool call — deliberately NOT a chip/pill, just
